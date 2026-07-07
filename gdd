@@ -1,0 +1,524 @@
+# THE HOLLOW ARCANUM
+### A Card-Driven RPG Duel — Full Game Design Document
+**Engine:** Odin + Raylib | **Team:** Solo/small, programmers only, no art team | **Format:** 6-day jam scope | **Genre:** Turn-based RPG duel, Souls-like tone, hidden trading-card engine
+
+---
+
+## PART 1 — VISION & PILLARS
+
+### 1.1 Premise
+Every duel plays like a classic turn-based RPG battle — HP bars, a spell menu, dice rolling under the hood, a timing bar you can master with practice. Underneath, entirely hidden from the player unless they study it closely, every "spell" is secretly a playing card, every "resource" is secretly a suit of mana, and every encounter is secretly a hand of Magic-the-Gathering-style card play resolved with a d20 and a d6. The player never needs to know this to enjoy the game. The player who *does* notice is rewarded with a much deeper read on the system.
+
+### 1.2 Design Pillars
+1. **RPG on the surface, card game underneath.** Every UI element uses RPG language (spell names, MP, crits) — never card language (never show "5 of Diamonds" on screen).
+2. **No art team, no problem.** Every visual is a primitive shape, a color, and a coded tween. Style comes from consistent palette and readable silhouettes, not assets.
+3. **Souls-like restraint.** No dialogue trees, no cutscenes, no narrator. Lore exists only in item flavor text, enemy names, and environmental one-liners at bonfires — sparse, evocative, optional to read.
+4. **Mastery over grinding.** Attributes exist, but the stated fiction is that wizards don't get *stronger*, they get *faster and smarter* — mechanically this means leveling mostly widens timing windows and improves odds, rather than trivializing fights with raw numbers.
+5. **The game never hard-stalls.** Failed rolls have fallback consequences (HP-for-mana conversion, deck reshuffling) so a player is never stuck doing nothing.
+
+---
+
+## PART 2 — WORLD & LORE (Souls-like, environmental only)
+
+### 2.1 The Setting
+Long ago, magic was inexhaustible — wizards drew mana as freely as breath. That age ended in an event the survivors call **the Ebbing**. Now mana must be *summoned* from what's left of the world's dwindling reserve, one card at a time, through half-remembered ritual (the Channel). The old tournament grounds where wizards once competed for glory — **the Hollow Arcanum** — still stand, empty of any audience, kept alive only by the duels still fought inside it. No one quite remembers why the duels continue. They simply do.
+
+There is no overworld because there is nothing left outside the Arcanum worth walking through. The player moves from duel to duel the way a soul moves from bonfire to bonfire — pulled forward by the ritual itself, not by a map.
+
+### 2.2 Environmental Storytelling (Souls-style — brief, never explained outright)
+- **Bonfire equivalent — "Sigil Flames":** small motes of dead mana that flare when a duelist rests near them. Flavor line on first rest: *"The flame does not warm. It only remembers."*
+- **Shop equivalent — "The Reliquary":** a wall of unclaimed gear left behind by duelists who never returned to collect it. No merchant NPC needed — just a UI framed as rifling through the reliquary itself.
+- **Item flavor text:** every gear piece gets one short evocative line, Dark-Souls-style, never explaining mechanics directly. Examples:
+  - *Ember Wand — "It does not cast fire. It remembers being fire."*
+  - *Robe of the Unnamed Rank — "Once tournament colors. No one recalls which house."*
+  - *Ring of the Ember Choir — "They sang until the flame took their voices too."*
+- **Enemy naming:** enemies are never "Goblin #3" — they're remnants of the tournament's dead ranks: **"A Hollowed Challenger," "The Unseated Duelist," "Echo of the Fourth Bracket."** This implies a whole dead tournament structure without ever stating it.
+- **The Boss — "The Last Arcanist":** implied (never stated) to be the tournament's final champion, still fighting because the Arcanum won't let a champion leave undefeated. Mechanically, this is the only fight in the game that draws from and masters *all four* card types at once (Sorcery, Status, Creature, Wild) — the lore and the mechanical design reinforce each other without a single line of dialogue.
+
+### 2.3 Lore Delivery Rule
+No cutscenes, no NPC dialogue, no narrator voice. All lore is optional flavor text a player can choose to read (on gear, on Sigil Flames, on enemy-defeat log lines) or skip entirely without losing any mechanical information. This is both a design pillar and a scope-saver — you never need to write or trigger a single scripted story beat.
+
+---
+
+## PART 3 — CORE SYSTEMS (with pseudocode)
+
+### 3.1 The Hidden Deck
+One standard 54-card deck (52 + 2 Jokers) is shared by both combatants for the encounter. Card type is derived purely from rank:
+
+| Card type | Cards | Behavior | Value |
+|---|---|---|---|
+| Sorcery | 2–10 | Direct damage, then discard | rank-scaled |
+| Status | Ace (×4) | Applies a status effect, **stays on field** as a visible marker until it expires | no direct damage |
+| Creature | J / Q / K | Stays on field; owner chooses Attack or Block each turn | J=4, Q=5, K=6 |
+| Wild | Joker (×2) | Cast-time choice: Sorcery (6 dmg, discard) or Creature (6 atk, stays on field) | 6 |
+
+**Data-driven tip (Odin):** don't hand-write 54 card entries. Generate the deck procedurally at startup from two enums, and derive `CardType` from rank at generation time — this keeps balance changes to a couple of constants instead of 54 edits.
+
+```odin
+Suit :: enum { Clubs, Spades, Hearts, Diamonds }
+CardType :: enum { Sorcery, Status, Creature, Wild }
+
+Card :: struct {
+    rank: int,      // 1=Ace, 2-10 numeric, 11=J, 12=Q, 13=K, 0=Joker
+    suit: Suit,     // ignored for Jokers
+    is_joker: bool,
+    card_type: CardType,
+}
+
+derive_card_type :: proc(rank: int, is_joker: bool) -> CardType {
+    if is_joker do return .Wild
+    if rank == 1 do return .Status
+    if rank >= 11 do return .Creature
+    return .Sorcery
+}
+
+build_deck :: proc() -> [dynamic]Card {
+    deck := make([dynamic]Card, 0, 54)
+    for suit in Suit {
+        for rank in 1..=13 {
+            append(&deck, Card{rank, suit, false, derive_card_type(rank, false)})
+        }
+    }
+    append(&deck, Card{0, .Clubs, true, .Wild}) // suit unused for jokers
+    append(&deck, Card{0, .Clubs, true, .Wild})
+    return deck
+}
+```
+
+**Reshuffle rule:** once the shared deck is empty on any draw attempt, shuffle the discard pile into a fresh deck and continue. This should be one shared procedure called from every draw site (Channel draw, hand refill), never duplicated.
+
+```odin
+draw_card :: proc(state: ^EncounterState) -> Card {
+    if len(state.deck) == 0 {
+        reshuffle_discard_into_deck(state)
+    }
+    idx := len(state.deck) - 1
+    card := state.deck[idx]
+    pop(&state.deck)
+    return card
+}
+```
+
+### 3.2 Turn Structure Overview
+Every turn, for both player and enemy, in this fixed order:
+
+1. **Creature stance resolution** (existing field creatures act on their assigned stance from last turn — Attack or Block)
+2. **Channel phase** (attempt to gain mana)
+3. **Draw step** (optional mulligan)
+4. **Cast phase** (spend mana on a hand card; assign new stances to any freshly summoned or existing creatures for *next* turn)
+
+**Pseudocode — full turn:**
+```odin
+run_turn :: proc(state: ^EncounterState, acting: ^Combatant, opposing: ^Combatant) {
+    resolve_creature_stances(acting, opposing)       // step 1
+    channel_phase(state, acting)                     // step 2
+    draw_step(state, acting)                          // step 3
+    cast_phase(state, acting, opposing)               // step 4
+}
+```
+
+### 3.3 Channel Phase (mana generation — replaces MTG's land drop)
+```odin
+channel_phase :: proc(state: ^EncounterState, c: ^Combatant) {
+    if roll_d20() + c.attrs.resolve_bonus >= 11 {
+        card := draw_card(state)
+        c.mana_pool[card.suit] += card.rank
+        return
+    }
+    // second attempt
+    if roll_d20() + c.attrs.resolve_bonus >= 11 {
+        card := draw_card(state)
+        c.mana_pool[card.suit] += card.rank
+        return
+    }
+    // blood magic fallback — never fully stalls
+    c.hp -= 2
+    wild_token := draw_card(state) // identity never revealed to either player
+    c.wild_mana += 1 // flat 1 mana, any suit, spent as chosen at cast time
+    move_to_discard_facedown(state, wild_token)
+}
+```
+**Tip:** keep `wild_mana` as a separate int on `Combatant`, not folded into `mana_pool[Suit]`, since it can satisfy *any* suit — resolve it as a fallback check in `can_afford()` rather than trying to force it into the suit-indexed array.
+
+### 3.4 Draw Step (semi-mulligan)
+```odin
+draw_step :: proc(state: ^EncounterState, c: ^Combatant, mulligan_mask: []bool) {
+    for i, discard in mulligan_mask {
+        if discard {
+            move_to_discard(state, c.hand[i])
+            c.hand[i] = draw_card(state)
+        }
+    }
+}
+```
+For the player, `mulligan_mask` comes from UI input (toggle which hand slots to redraw). For enemies, generate it from AI logic (see §3.8).
+
+### 3.5 Cast Phase
+```odin
+can_afford :: proc(c: ^Combatant, card: Card) -> bool {
+    return c.mana_pool[card.suit] >= card.rank || c.wild_mana > 0
+}
+
+cast_card :: proc(state: ^EncounterState, caster: ^Combatant, target: ^Combatant, card: Card) {
+    spend_mana(caster, card)
+
+    switch card.card_type {
+    case .Sorcery:
+        tier := run_timing_minigame(caster.attrs.focus_bonus)
+        dmg := roll_d6() + rank_to_damage_bonus(card.rank) + caster.attrs.arcana_bonus
+        dmg = apply_crit_bonus(dmg, tier)
+        deal_damage(target, dmg)
+        move_to_discard(state, card)
+
+    case .Status:
+        tier := run_timing_minigame(caster.attrs.focus_bonus)
+        if tier == .Clean || tier == .Perfect {
+            apply_status_marker(target, suit_to_status(card.suit), duration = 3)
+        }
+        add_field_status(caster, card, target) // stays visible on field until expired
+
+    case .Creature:
+        add_field_creature(caster, card) // no timing check on summon itself
+
+    case .Wild:
+        mode := decide_wild_mode(caster) // player choice via UI, or AI heuristic
+        if mode == .Sorcery {
+            tier := run_timing_minigame(caster.attrs.focus_bonus)
+            dmg := roll_d6() + 6 + caster.attrs.arcana_bonus
+            dmg = apply_crit_bonus(dmg, tier)
+            deal_damage(target, dmg)
+            move_to_discard(state, card)
+        } else {
+            add_field_creature(caster, card)
+        }
+    }
+}
+```
+
+### 3.6 Creature Field & Combat
+```odin
+FieldCreature :: struct {
+    rank: int,           // 11/12/13, Joker-as-creature treated as 13
+    attack_value: int,   // 4/5/6
+    stance: Stance,      // Attack or Block, chosen at end of caster's cast phase for NEXT turn
+}
+
+resolve_creature_stances :: proc(acting: ^Combatant, opposing: ^Combatant) {
+    for creature in acting.field_creatures {
+        if creature.stance == .Attack {
+            blocker := find_blocker(opposing)
+            if blocker != nil {
+                resolve_creature_trade(creature, blocker, acting, opposing)
+            } else {
+                deal_damage(opposing, creature.attack_value)
+            }
+        }
+        // .Block creatures do nothing offensively this turn, but remain available to intercept
+    }
+}
+
+resolve_creature_trade :: proc(attacker: ^FieldCreature, blocker: ^FieldCreature, atk_owner, blk_owner: ^Combatant) {
+    if attacker.rank > blocker.rank {
+        remove_creature(blk_owner, blocker)
+    } else if blocker.rank > attacker.rank {
+        remove_creature(atk_owner, attacker)
+    } else {
+        remove_creature(atk_owner, attacker)
+        remove_creature(blk_owner, blocker)
+    }
+    // removed creatures go to discard pile, re-enter the deck on next reshuffle
+}
+```
+**Field slot cap:** enforce a constant (`MAX_FIELD_CREATURES :: 2`) when adding a creature; if full, either reject the cast (simplest) or replace the oldest (`ordered_remove` from the dynamic array at index 0 before appending).
+
+### 3.7 Timing Minigame (crit/status determination — reused everywhere)
+```odin
+TimingTier :: enum { Miss, Weak, Clean, Perfect }
+
+run_timing_minigame :: proc(zone_width_bonus: f32) -> TimingTier {
+    // Called once per player input frame-loop while the marker sweeps;
+    // this pseudocode shows the *resolution* step once the player presses the stop key.
+    zone_width := BASE_ZONE_WIDTH + zone_width_bonus
+    dist := abs(marker_position - zone_center)
+    if dist < zone_width * 0.15 do return .Perfect
+    if dist < zone_width * 0.5  do return .Clean
+    if dist < zone_width * 1.0  do return .Weak
+    return .Miss
+}
+```
+**Odin/Raylib tip:** drive `marker_position` from `rl.GetFrameTime()` accumulation, not frame count, so the minigame feels identical regardless of the Chromebook's actual framerate. Something like:
+```odin
+marker_position += marker_speed * rl.GetFrameTime()
+if marker_position > BAR_WIDTH || marker_position < 0 {
+    marker_speed = -marker_speed // bounce
+}
+```
+
+### 3.8 Enemy AI (no human input — flat heuristics only)
+```odin
+AIBehavior :: enum { Aggressive, Defensive, Random }
+
+choose_enemy_cast :: proc(enemy: ^Combatant, behavior: AIBehavior) -> Maybe(Card) {
+    affordable := affordable_cards_in_hand(enemy)
+    if len(affordable) == 0 do return nil
+
+    switch behavior {
+    case .Aggressive:
+        return highest_rank(affordable)
+    case .Defensive:
+        hearts := filter_by_suit(affordable, .Hearts)
+        return len(hearts) > 0 ? hearts[0] : highest_rank(affordable)
+    case .Random:
+        return affordable[rand.int_max(len(affordable))]
+    }
+}
+
+choose_enemy_stance :: proc(behavior: AIBehavior, has_board_advantage: bool) -> Stance {
+    switch behavior {
+    case .Aggressive: return .Attack
+    case .Defensive:  return has_board_advantage ? .Attack : .Block
+    case .Random:      return rand.int_max(2) == 0 ? .Attack : .Block
+    }
+}
+```
+No behavior tree, no utility scoring — a single switch per decision point is enough for jam scope and is trivial to balance by eye.
+
+### 3.9 Status Effects
+Keep this to 4 effects max (one per hidden suit) so it's buildable in a day:
+```odin
+StatusKind :: enum { Burn, Freeze, Ward, Drain }
+
+suit_to_status :: proc(s: Suit) -> StatusKind {
+    switch s {
+    case .Clubs:    return .Burn    // damage over time
+    case .Spades:   return .Freeze  // skip next action
+    case .Hearts:   return .Ward    // reduce next incoming hit
+    case .Diamonds: return .Drain   // steal HP to caster
+    }
+}
+
+tick_status_effects :: proc(c: ^Combatant) {
+    for &status in c.field_statuses {
+        switch status.kind {
+        case .Burn:  deal_damage(c, BURN_TICK_DAMAGE)
+        case .Freeze: c.skip_next_action = true
+        case .Ward:  // consumed reactively on next incoming hit, not ticked here
+        case .Drain: // one-time effect at application, not ticked
+        }
+        status.turns_remaining -= 1
+    }
+    remove_expired_statuses(c) // moves expired FieldStatus entries to discard
+}
+```
+
+---
+
+## PART 4 — DATA-DRIVEN DESIGN APPROACH
+
+The whole point of building this data-driven is that balance passes (Day 6) should mean editing numbers in one table, never touching logic code.
+
+**Recommended data tables (all as flat Odin arrays of structs, no external file parsing needed for jam scope — JSON/config loading is a nice-to-have, not a requirement):**
+
+```odin
+EnemyDef :: struct {
+    name: string,          // flavor name, e.g. "A Hollowed Challenger"
+    max_hp: int,
+    behavior: AIBehavior,
+    crit_threshold: int,   // flat d20 threshold replacing timing minigame for enemies
+    attrs: Attributes,
+}
+
+enemy_table := [?]EnemyDef{
+    {"A Hollowed Challenger", 18, .Random,     15, {0,0,0,0,0,0}},
+    {"The Unseated Duelist",  24, .Aggressive, 16, {1,0,0,0,0,0}},
+    {"Echo of the Fourth Bracket", 30, .Defensive, 14, {0,1,0,1,0,0}},
+    // ... add rows, never new code, to add enemies
+}
+
+GearDef :: struct {
+    name: string,
+    flavor_text: string,
+    attr_target: string,  // which Attributes field, matched by name at equip time
+    bonus: int,
+    slot: string,          // "weapon", "armor", "ring", "hat", "amulet"
+}
+
+gear_table := [?]GearDef{
+    {"Ember Wand", "It does not cast fire. It remembers being fire.", "arcana", 2, "weapon"},
+    {"Robe of the Unnamed Rank", "Once tournament colors. No one recalls which house.", "vitality", 3, "armor"},
+    {"Ring of the Ember Choir", "They sang until the flame took their voices too.", "focus", 1, "ring"},
+    // ...
+}
+```
+
+**Node sequence as data too:**
+```odin
+NodeType :: enum { Battle, Shop, Bonfire, Boss }
+
+run_sequence := [?]NodeType{
+    .Battle, .Battle, .Bonfire, .Battle, .Shop, .Battle, .Battle, .Bonfire, .Boss,
+}
+```
+Changing pacing for the whole game becomes editing one array literal — extremely fast to iterate on Day 5-6 balance passes.
+
+**General Odin data-driven tips:**
+- Use `#partial switch` sparingly and prefer exhaustive `switch` on your enums (Odin will warn on missing cases) — this catches bugs when you add a new `CardType` or `StatusKind` and forget to handle it somewhere.
+- Keep all tunable numbers (`BASE_ZONE_WIDTH`, `MAX_FIELD_CREATURES`, `BURN_TICK_DAMAGE`, d20 thresholds) as named constants at the top of one file, not scattered magic numbers — makes Day 6 balancing a single-file scan.
+- Favor plain arrays/dynamic arrays over maps where order doesn't matter for lookup speed — Odin's dynamic arrays are simple and fast enough at jam scale; don't reach for anything fancier.
+
+---
+
+## PART 5 — SCREEN & GAME STATE ARCHITECTURE
+
+```odin
+GameScreen :: enum { Battle, Shop, Bonfire, Boss, GameOver }
+
+GameState :: struct {
+    current_screen: GameScreen,
+    sequence_index: int,
+    player: Combatant,
+    encounter: EncounterState, // only populated during Battle/Boss
+}
+
+update :: proc(state: ^GameState) {
+    switch state.current_screen {
+    case .Battle, .Boss: update_battle(state)
+    case .Shop:          update_shop(state)
+    case .Bonfire:       update_bonfire(state)
+    case .GameOver:      update_game_over(state)
+    }
+}
+
+draw :: proc(state: ^GameState) {
+    rl.BeginDrawing()
+    defer rl.EndDrawing()
+    rl.ClearBackground(PALETTE_BG)
+    switch state.current_screen {
+    case .Battle, .Boss: draw_battle(state)
+    case .Shop:          draw_shop(state)
+    case .Bonfire:       draw_bonfire(state)
+    case .GameOver:      draw_game_over(state)
+    }
+}
+```
+**Tip:** resist the urge to build a generic "scene stack" or transition system. A single enum + switch is enough for 4 screens in a 6-day jam. Advance `sequence_index` and re-derive `current_screen` from `run_sequence[sequence_index]` whenever a node completes.
+
+---
+
+## PART 6 — CREATIVE PROGRAMMER ART & FAKE ANIMATION
+
+### 6.1 Visual Language
+- 5-6 hex colors total, reused consistently: one accent per hidden suit (applied only to spell icons/effect flashes, never shown as a "card"), a neutral UI color, an HP-red.
+- Combatants = a rounded-rect body + circle head, palette-differentiated by role (player/enemy/boss).
+- Everything else (spell menu, MP counters, status icons) uses plain RPG-menu-box styling — think a DQ/FF battle screen, not a card table.
+
+### 6.2 Generic Tween Helper (build once, reuse everywhere)
+```odin
+Tween :: struct {
+    start, target: f32,
+    elapsed, duration: f32,
+    active: bool,
+}
+
+update_tween :: proc(t: ^Tween, dt: f32) -> f32 {
+    if !t.active do return t.target
+    t.elapsed += dt
+    frac := clamp(t.elapsed / t.duration, 0, 1)
+    eased := frac * frac * (3 - 2 * frac) // smoothstep, cheap and reads well
+    if frac >= 1 do t.active = false
+    return t.start + (t.target - t.start) * eased
+}
+```
+Use one `Tween` per animated value (position x/y, scale, alpha, color-lerp-factor). Reuse this for:
+- **Cast lunge:** tween caster position toward target and back (~0.15-0.2s each leg).
+- **Hit flash:** tween a color-blend factor from 1→0 over a few frames, lerping the shape's draw color toward white/red.
+- **Crit scale pulse:** tween scale 1.0 → 1.2 → 1.0 on Clean/Perfect timing results.
+- **Menu slide-in:** tween each spell menu entry's Y position from off-screen to its resting slot when the menu opens.
+- **Status flicker:** don't tween this one — just toggle visibility based on `int(elapsed * flicker_rate) % 2` for a cheap flame-flicker look on burn icons.
+- **Floating damage numbers:** tween Y position upward and alpha 1→0 over ~0.5s; spawn as a small transient struct in a pool, not a permanent per-combatant field.
+
+---
+
+## PART 7 — TUTORIAL (small, in-fiction, no dialogue)
+
+### 7.1 Design
+The tutorial is the first node in the sequence — a scripted, low-stakes duel against **"A Faded Echo"** (flavor name, 12 HP, no real threat). Instruction is delivered the way Dark Souls delivers it: brief on-screen prompts tied to the *first time* a mechanic is relevant, never a wall of text up front, and never repeated once dismissed.
+
+### 7.2 Tutorial State Machine
+```odin
+TutorialStep :: enum { Intro, ShowChannel, ShowCast, ShowTiming, ShowCreature, ShowStatus, Done }
+
+tutorial_state: TutorialStep = .Intro
+
+maybe_show_tutorial_prompt :: proc(step: TutorialStep) {
+    if tutorial_state != step do return
+    switch step {
+    case .Intro:
+        draw_prompt("Press ENTER to begin the duel.")
+    case .ShowChannel:
+        draw_prompt("Press SPACE to draw on what power remains.")
+    case .ShowCast:
+        draw_prompt("Choose a spell. It will cost what you've drawn.")
+    case .ShowTiming:
+        draw_prompt("Stop the mark clean to strike true.")
+    case .ShowCreature:
+        draw_prompt("Some workings linger. They act on their own accord.")
+    case .ShowStatus:
+        draw_prompt("Some markings do not fade at once.")
+    case .Done:
+        // no prompt
+    }
+}
+
+advance_tutorial_if_ready :: proc(event: GameplayEvent) {
+    switch tutorial_state {
+    case .Intro:        if event == .EncounterStarted   do tutorial_state = .ShowChannel
+    case .ShowChannel:  if event == .PlayerChanneled     do tutorial_state = .ShowCast
+    case .ShowCast:     if event == .PlayerCastSorcery   do tutorial_state = .ShowTiming
+    case .ShowTiming:   if event == .TimingResultShown   do tutorial_state = .ShowCreature
+    case .ShowCreature: if event == .PlayerSummoned      do tutorial_state = .ShowStatus
+    case .ShowStatus:   if event == .PlayerCastStatus    do tutorial_state = .Done
+    case .Done: // no-op
+    }
+}
+```
+**Design note:** if the player never triggers a step naturally (e.g. never draws a Creature card in their opening hand), don't force it — either skip that prompt silently after a turn-count threshold, or stack the tutorial enemy/starting hand deterministically (rig the first few draws for this one encounter only) so every player sees all six prompts in their first duel. Rigging the opening hand is far cheaper than building fallback logic — just special-case the first encounter's deck order.
+
+### 7.3 Tutorial Encounter Data
+```odin
+tutorial_enemy := EnemyDef{"A Faded Echo", 12, .Random, 18, {0,0,0,0,0,0}}
+tutorial_forced_player_hand := [5]Card{
+    {5, .Clubs, false, .Sorcery},   // guarantees a Sorcery to demonstrate Cast + Timing
+    {11, .Hearts, false, .Creature},// guarantees a Creature to demonstrate summon/stance
+    {1, .Spades, false, .Status},   // guarantees a Status to demonstrate field markers
+    {3, .Diamonds, false, .Sorcery},
+    {7, .Clubs, false, .Sorcery},
+}
+```
+Only the tutorial encounter uses a forced hand — every subsequent battle uses the normal shuffled shared deck.
+
+---
+
+## PART 8 — DAY-BY-DAY BUILD PLAN (6 days)
+
+**Day 0 (pre-jam):** Validate Odin + Raylib actually builds and runs on the Chromebook (Crostini). This is the single biggest technical risk given prior LLVM instability — test this before writing game logic. Fallback: build on any available Windows machine if Crostini proves unreliable.
+
+**Day 1:** Screen state machine (`GameScreen` enum + switch). Deck generation + shuffle + draw/reshuffle. Render a placeholder battle screen: HP bars, empty spell menu box. Build the `Tween` helper and lock the color palette.
+
+**Day 2:** Channel phase (d20, mana pool, blood-magic fallback) wired to real UI (MP-style counters per flavor-named school). Draw step / mulligan UI. Cast phase for Sorcery only (no timing minigame yet — flat damage) to prove the resource loop end-to-end.
+
+**Day 3:** Timing minigame + crit tiers + d6 damage + status application (Burn/Freeze/Ward/Drain, capped at these 4). Hit flash, cast lunge, floating damage numbers via Tween.
+
+**Day 4:** Creature system — field slots, Attack/Block stance UI, trade resolution. Enemy AI (3 behavior tags). Equipment + attribute leveling (Shop/Bonfire merged screen if time-pressed). Data tables for enemies/gear/node sequence.
+
+**Day 5:** Tutorial encounter (forced hand, prompt state machine). Full node sequence wired end-to-end, including the Boss (suit/rank immunity rule, phase-2 stat bump). Playtest a full run start to finish.
+
+**Day 6:** Buffer day. Balance pass using the data tables only (no logic changes). Cut anything broken rather than fixing late. Write flavor text for remaining gear/enemies. Package build, write the jam page, submit early.
+
+---
+
+## PART 9 — RISKS
+1. **Chromebook/Crostini toolchain instability** — mitigate Day 0, before any other work.
+2. **Scope creep on creature combat** — if trades/blocking prove buggy by Day 4 end, cut to "creatures always attack, no blocking" as a fallback rather than shipping a broken interaction.
+3. **Tutorial forced-hand not covering all steps** — verify the rigged opening hand actually triggers all six prompts in a dry run before moving on from Day 5.
+4. **Balance drift** — because everything is table-driven, resist the urge to hand-tune exceptions in code; if a fight is unfair, fix its `EnemyDef` row, not its logic.
